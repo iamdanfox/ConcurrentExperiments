@@ -14,21 +14,22 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
   arrays.set(0, new Chunk(1))
 
   val cellUpdate = ((0, 0), null.asInstanceOf[V], Null().asInstanceOf[V])
+  val chCAS = None.asInstanceOf[Option[(Int, Chunk, Chunk)]]
   // state = (firstBlank, cellUpdate)
-  val state = new AtomicReference(((0, 0), cellUpdate))
+  val state = new AtomicReference(((0, 0), cellUpdate, chCAS))
 
   /**
    * Try to apply cellUpdate, (expanding/contracting as necessary) then
    * create new state, try to put back
    */
   @annotation.tailrec final def push(x: T): Boolean = {
-    val oldState @ (firstBlank, (index, expect, replace)) = state.get()
+    val oldState @ (firstBlank, (index, expect, replace), chCAS) = state.get()
 
     extendToInclude(index)
-    if (arrayCAS(index, expect, replace)) {
+    if (chunkCAS(chCAS) && arrayCAS(index, expect, replace)) {
       // want to write into firstblank and increment it
       val oldVal = arrayGet(firstBlank)
-      val newState = (increment(firstBlank), (firstBlank, oldVal, Datum(x)))
+      val newState = (increment(firstBlank), (firstBlank, oldVal, Datum(x)), None)
       if (this.state.compareAndSet(oldState, newState)) {
         return true
       }
@@ -37,7 +38,7 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
   }
 
   @annotation.tailrec final def pop: Option[T] = {
-    val oldState @ (firstBlank, (index, expect, replace)) = state.get()
+    val oldState @ (firstBlank, (index, expect, replace), chCAS) = state.get()
 
     decrement(firstBlank) match {
       case None => return None
@@ -46,7 +47,7 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
         if (arrayCAS(index, expect, replace)) {
           // we know we can decrement
           val rtn = arrayGet(lastCell)
-          val newState = (lastCell, (lastCell, rtn, Null()))
+          val newState = (lastCell, (lastCell, rtn, Null()), None)
           if (this.state.compareAndSet(oldState, newState)) {
             return Some(rtn.asInstanceOf[Datum].x)
           }
@@ -58,7 +59,16 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
 
   // precondition: array(index._1) exists!. postcondition, cell holds `replace` (ie its idempotent)
   def arrayCAS(index: Index, expect: V, replace: V): Boolean =
-    arrays.get(index._1).get(index._2) == replace || arrays.get(index._1).compareAndSet(index._2, expect, replace)
+    arrays.get(index._1) != null &&
+      (arrays.get(index._1).get(index._2) == replace ||
+        arrays.get(index._1).compareAndSet(index._2, expect, replace))
+
+  def chunkCAS(chCAS: Option[(Int, Chunk, Chunk)]): Boolean =
+    chCAS match {
+      case None => true
+      case Some((chIndex, expect, replace)) =>
+        arrays.get(chIndex) == replace || arrays.compareAndSet(chIndex, expect, replace)
+    }
 
   def extendToInclude(index: Index) = {
     if (arrays.get(index._1) == null) {
@@ -69,7 +79,7 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
 
   // returns the next Index we can write to after filling argument index
   def increment(index: Index): Index =
-    if (index._2 == scala.math.pow(2,index._1) - 1)
+    if (index._2 == scala.math.pow(2, index._1) - 1)
       (index._1 + 1, 0)
     else
       (index._1, index._2 + 1)
