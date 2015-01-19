@@ -15,21 +15,21 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
 
   val cellUpdate = ((0, 0), null.asInstanceOf[V], Null().asInstanceOf[V])
   val chCAS = None.asInstanceOf[Option[(Int, Chunk, Chunk)]]
-  // state = (firstBlank, cellUpdate)
-  val state = new AtomicReference(((0, 0), cellUpdate, chCAS))
+  val nextPush = (0, 0)
+  val state = new AtomicReference((nextPush, chCAS, cellUpdate))
 
   /**
    * Try to apply cellUpdate, (expanding/contracting as necessary) then
    * create new state, try to put back
    */
   @annotation.tailrec final def push(x: T): Boolean = {
-    val oldState @ (firstBlank, (index, expect, replace), chCAS) = state.get()
+    val oldState @ (nextPush, chCAS, (index, expect, replace)) = state.get()
 
     if (chunkCAS(chCAS) && arrayCAS(index, expect, replace)) {
       // want to write into firstblank and increment it
-      val oldVal = arrayGet(firstBlank)
-      
-      val newState = (increment(firstBlank), (firstBlank, oldVal, Datum(x)), extendToInclude(firstBlank))
+      val oldVal = arrayGet(nextPush)
+
+      val newState = (increment(nextPush), extendToInclude(nextPush), (nextPush, oldVal, Datum(x)))
       if (this.state.compareAndSet(oldState, newState)) {
         return true
       }
@@ -38,16 +38,16 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
   }
 
   @annotation.tailrec final def pop: Option[T] = {
-    val oldState @ (firstBlank, (index, expect, replace), chCAS) = state.get()
+    val oldState @ (nextPush, chCAS, (index, expect, replace)) = state.get()
 
-    decrement(firstBlank) match {
+    decrement(nextPush) match {
       case None => return None
       case Some(lastCell) => {
         if (chunkCAS(chCAS) && arrayCAS(index, expect, replace)) {
           // we know we can decrement
           val rtn = arrayGet(lastCell)
-          
-          val newState = (lastCell, (lastCell, rtn, Null()), extendToInclude(lastCell))
+
+          val newState = (lastCell, extendToInclude(lastCell), (lastCell, rtn, Null()))
           if (this.state.compareAndSet(oldState, newState)) {
             return Some(rtn.asInstanceOf[Datum].x)
           }
@@ -57,10 +57,12 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
     pop // otherwise recurse
   }
 
-  def arrayCAS(index: Index, expect: V, replace: V): Boolean =
-    arrays.get(index._1) != null &&
-      (arrays.get(index._1).get(index._2) == replace ||
-        arrays.get(index._1).compareAndSet(index._2, expect, replace))
+  def arrayCAS(index: Index, expect: V, replace: V): Boolean = {
+    val arr = arrays.get(index._1)
+    return arr != null &&
+      (arr.get(index._2) == replace ||
+        arr.compareAndSet(index._2, expect, replace))
+  }
 
   def chunkCAS(chCAS: Option[(Int, Chunk, Chunk)]): Boolean =
     chCAS match {
@@ -69,11 +71,17 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
         arrays.get(chIndex) == replace || arrays.compareAndSet(chIndex, expect, replace)
     }
 
-  def extendToInclude(index: Index): Option[(Int, Chunk, Chunk)] =
-    if (arrays.get(index._1) == null)
-      Some((index._1, null, new Chunk(arrays.get(index._1 - 1).length * 2)))
-    else
-      None
+  def extendToInclude(index: Index): Option[(Int, Chunk, Chunk)] = {
+    if (arrays.get(index._1) == null) // ie we're submitting a push to a chunk that doesn't exist yet
+      Some((index._1, null, new Chunk(scala.math.pow(2, index._1).asInstanceOf[Int])))
+    else {
+      val after = arrays.get(index._1 + 1)
+      if (after != null) // no need to keep a whole empty one
+        Some(index._1 + 1, after, null)
+      else
+        None
+    }
+  }
 
   // returns the next Index we can write to after filling argument index
   def increment(index: Index): Index =
