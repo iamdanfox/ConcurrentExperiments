@@ -25,11 +25,11 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
   @annotation.tailrec final def push(x: T): Boolean = {
     val oldState @ (firstBlank, (index, expect, replace), chCAS) = state.get()
 
-    extendToInclude(index)
     if (chunkCAS(chCAS) && arrayCAS(index, expect, replace)) {
       // want to write into firstblank and increment it
       val oldVal = arrayGet(firstBlank)
-      val newState = (increment(firstBlank), (firstBlank, oldVal, Datum(x)), None)
+      
+      val newState = (increment(firstBlank), (firstBlank, oldVal, Datum(x)), extendToInclude(firstBlank))
       if (this.state.compareAndSet(oldState, newState)) {
         return true
       }
@@ -43,11 +43,11 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
     decrement(firstBlank) match {
       case None => return None
       case Some(lastCell) => {
-        extendToInclude(index)
-        if (arrayCAS(index, expect, replace)) {
+        if (chunkCAS(chCAS) && arrayCAS(index, expect, replace)) {
           // we know we can decrement
           val rtn = arrayGet(lastCell)
-          val newState = (lastCell, (lastCell, rtn, Null()), None)
+          
+          val newState = (lastCell, (lastCell, rtn, Null()), extendToInclude(lastCell))
           if (this.state.compareAndSet(oldState, newState)) {
             return Some(rtn.asInstanceOf[Datum].x)
           }
@@ -57,7 +57,6 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
     pop // otherwise recurse
   }
 
-  // precondition: array(index._1) exists!. postcondition, cell holds `replace` (ie its idempotent)
   def arrayCAS(index: Index, expect: V, replace: V): Boolean =
     arrays.get(index._1) != null &&
       (arrays.get(index._1).get(index._2) == replace ||
@@ -70,12 +69,11 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
         arrays.get(chIndex) == replace || arrays.compareAndSet(chIndex, expect, replace)
     }
 
-  def extendToInclude(index: Index) = {
-    if (arrays.get(index._1) == null) {
-      val newArray = new Chunk(arrays.get(index._1 - 1).length * 2);
-      arrays.compareAndSet(index._1, null, newArray)
-    }
-  }
+  def extendToInclude(index: Index): Option[(Int, Chunk, Chunk)] =
+    if (arrays.get(index._1) == null)
+      Some((index._1, null, new Chunk(arrays.get(index._1 - 1).length * 2)))
+    else
+      None
 
   // returns the next Index we can write to after filling argument index
   def increment(index: Index): Index =
