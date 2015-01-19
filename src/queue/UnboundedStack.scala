@@ -1,4 +1,5 @@
 package queue
+import java.util.concurrent.atomic.{ AtomicReferenceArray, AtomicReference }
 
 /**
  * Idea: head and tail pointers into an array work well, but what happens when we reach the end?
@@ -14,55 +15,64 @@ package queue
  */
 class UnboundedStack[T: scala.reflect.ClassTag] {
 
-  type DataArray = Array[Option[T]]
+  type Chunk = Array[T]
+  type Index = (Int, Int)
 
-  val arrays = new Array[DataArray](20)
-  arrays(0) = new DataArray(1)
-  var end = (0, 0) // holds the first blank space after the queue
+  val arrays = new Array[Chunk](20)
+  arrays(0) = new Chunk(1)
 
-  /**
-   * Decrement end and take the value that occupied its place
-   */
-  def pop: Option[T] = {
-    val (chunkIndex, cell) = end
-
-    if (cell > 0) {
-      // just decrement
-      end = (chunkIndex, cell - 1)
-      return arrays(end._1)(end._2)
-    } else {
-      // nothing left in this array
-      if (chunkIndex > 0) {
-        // drop back to prev array
-        end = (chunkIndex - 1, arrays(chunkIndex - 1).length - 1)
-        arrays(chunkIndex) = null
-        return arrays(end._1)(end._2) // TODO: assert this is always Some(-)
-      } else {
-        // nothing left at all
-        return None
-      } 
-    }
-  }
+  val cellUpdate = ((0, 0), null.asInstanceOf[T], null.asInstanceOf[T])
+  // state = (firstBlank, cellUpdate)
+  val state = new AtomicReference(((0, 0), cellUpdate))
 
   /**
-   * Insert a value and increment end, expanding capacity if necessary
+   * Try to apply cellUpdate, (expanding/contracting as necessary) then
+   * create new state, try to put back
    */
   def push(x: T): Boolean = {
-    val (chunkIndex, cell) = end
-    arrays(chunkIndex)(cell) = Some(x)
-    val currentArrayCapacity = arrays(chunkIndex).length
+    val oldState @ (firstBlank, (index, expect, replace)) = state.get()
+
+    extendToInclude(index)
+    val updated = arrayCAS(index, expect, replace)
+
+    if (updated) {
+      extendToInclude(firstBlank)
+      // want to write into firstblank and increment it
+      val oldVal = arrayGet(firstBlank)
+      val newState = (increment(firstBlank), (firstBlank, oldVal, x))
+      if (this.state.compareAndSet(oldState, newState)) {
+        return true
+      }
+    }
     
-    if (cell + 1 == currentArrayCapacity) {
-      // need to extend
-      end = (chunkIndex + 1, 0)
-      arrays(chunkIndex + 1) = new DataArray(2 * currentArrayCapacity)
-    } else {
-      // just increment
-      end = (chunkIndex, cell + 1)
-    } 
-    
+    push(x) // otherwise recurse
+  }
+
+  // precondition: array(index._1) exists!. postcondition, cell holds `replace` (ie its idempotent)
+  def arrayCAS(index: Index, expect: T, replace: T): Boolean = {
+    arrays(index._1)(index._2) = replace // TODO CAS
     return true
   }
+
+  def extendToInclude(index: Index) = {
+    if (arrays(index._1) == null)
+      arrays(index._1) = new Chunk(arrays(index._1 - 1).length * 2)
+  }
+
+  def shrinkIfPossible(index: Index) = {
+    if (arrays(index._1 + 1) != null)
+      arrays(index._1 + 1) = null
+  }
+
+  // returns the next Index we can write to after filling argument index
+  def increment(index: Index): Index =
+    if (index._2 == arrays(index._1).length - 1)
+      (index._1 + 1, 0)
+    else
+      (index._1, index._2 + 1)
+
+  def arrayGet(pair: Index): T =
+    arrays(pair._1)(pair._2)
 
 }
 
@@ -70,9 +80,15 @@ object UnboundedStack {
 
   def main(args: Array[String]) = {
     val st = new UnboundedStack[String]()
-    st.push("Hello")
-    st.push("!")
-    println(st.pop)
-    println(st.pop)
+    //    st.push("Hello")
+    //    st.push("!")
+    //    assert(st.pop == Some("!"))
+    //    assert(st.pop == Some("Hello"))
+    println(st.push("a"))
+    println(st.push("a"))
+    println(st.push("a"))
+    //    st.push("1")
+    //    assert(st.pop == Some("1"))
+    println("Done.")
   }
 }
