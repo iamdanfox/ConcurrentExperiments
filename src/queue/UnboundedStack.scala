@@ -23,12 +23,9 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
    */
   @annotation.tailrec final def push(x: T): Boolean = {
     val oldState @ (firstBlank, (index, expect, replace)) = state.get()
-//    print(firstBlank)
 
     extendToInclude(index)
-    val updated = arrayCAS(index, expect, replace)
-    if (updated) {
-      extendToInclude(firstBlank)
+    if (arrayCAS(index, expect, replace)) {
       // want to write into firstblank and increment it
       val oldVal = arrayGet(firstBlank)
       val newState = (increment(firstBlank), (firstBlank, oldVal, Datum(x)))
@@ -41,14 +38,12 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
 
   @annotation.tailrec final def pop: Option[T] = {
     val oldState @ (firstBlank, (index, expect, replace)) = state.get()
-//    print(firstBlank)
 
     decrement(firstBlank) match {
       case None => return None
       case Some(lastCell) => {
         extendToInclude(index)
-        val updated = arrayCAS(index, expect, replace)
-        if (updated) {
+        if (arrayCAS(index, expect, replace)) {
           // we know we can decrement
           val rtn = arrayGet(lastCell)
           val newState = (lastCell, (lastCell, rtn, Null()))
@@ -74,7 +69,7 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
 
   // returns the next Index we can write to after filling argument index
   def increment(index: Index): Index =
-    if (index._2 == arrays.get(index._1).length - 1)
+    if (index._2 == scala.math.pow(2,index._1) - 1)
       (index._1 + 1, 0)
     else
       (index._1, index._2 + 1)
@@ -87,8 +82,13 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
     else
       None
 
-  def arrayGet(pair: Index): V =
-    arrays.get(pair._1).get(pair._2)
+  def arrayGet(pair: Index): V = {
+    val arr = arrays.get(pair._1)
+    if (arr == null)
+      return null
+    else
+      arr.get(pair._2)
+  }
 }
 
 object UnboundedStack {
