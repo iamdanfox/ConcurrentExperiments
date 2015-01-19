@@ -1,21 +1,9 @@
 package queue
 import java.util.concurrent.atomic.{ AtomicReferenceArray, AtomicReference }
 
-/**
- * Idea: head and tail pointers into an array work well, but what happens when we reach the end?
- * Create another array, and let the tail pointer continue into that array!
- * pointers would then be pairs (int, int) that represent which array to look in and which cell within that array.
- * Maintain an array of say, 20 slots, each of which can contain an array.
- * Initially, only the first slot holds an array of maybe 16 slots.  When this is
- * filled, we create a new array of 32 slots and store a reference to it in the top
- * level array's second cell.  When the head pointer leaves one of the child arrays, we can destroy it completely.
- * ADVANTAGE: it doesn't require copying to resize, so good for concurrency (we avoid lots of threads trying to copy things and one failing)
- * benchmark against normal one (maybe protected by a 'farmer' proc, handing stuff to workers)
- *
- */
 class UnboundedStack[T: scala.reflect.ClassTag] {
 
-  type Chunk = Array[T]
+  type Chunk = AtomicReferenceArray[T]
   type Index = (Int, Int)
 
   val arrays = new Array[Chunk](20)
@@ -29,7 +17,7 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
    * Try to apply cellUpdate, (expanding/contracting as necessary) then
    * create new state, try to put back
    */
-  def push(x: T): Boolean = {
+  @annotation.tailrec final def push(x: T): Boolean = {
     val oldState @ (firstBlank, (index, expect, replace)) = state.get()
 
     extendToInclude(index)
@@ -44,15 +32,33 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
         return true
       }
     }
-    
     push(x) // otherwise recurse
   }
 
-  // precondition: array(index._1) exists!. postcondition, cell holds `replace` (ie its idempotent)
-  def arrayCAS(index: Index, expect: T, replace: T): Boolean = {
-    arrays(index._1)(index._2) = replace // TODO CAS
-    return true
+  @annotation.tailrec final def pop: Option[T] = {
+    val oldState @ (firstBlank, (index, expect, replace)) = state.get()
+
+    decrement(firstBlank) match {
+      case None => return None
+      case Some(lastCell) => {
+        extendToInclude(index)
+        val updated = arrayCAS(index, expect, replace)
+        if (updated) {
+          // we know we can decrement
+          val rtn = arrayGet(lastCell)
+          val newState = (lastCell, (lastCell, rtn, null.asInstanceOf[T]))
+          if (this.state.compareAndSet(oldState, newState)) {
+            return Some(rtn)
+          }
+        }
+      }
+    }
+    pop // otherwise recurse
   }
+
+  // precondition: array(index._1) exists!. postcondition, cell holds `replace` (ie its idempotent)
+  def arrayCAS(index: Index, expect: T, replace: T): Boolean =
+    arrays(index._1).get(index._2) == replace || arrays(index._1).compareAndSet(index._2, expect, replace)
 
   def extendToInclude(index: Index) = {
     if (arrays(index._1) == null)
@@ -71,8 +77,16 @@ class UnboundedStack[T: scala.reflect.ClassTag] {
     else
       (index._1, index._2 + 1)
 
+  def decrement(index: Index): Option[Index] =
+    if (index._2 > 0)
+      Some((index._1, index._2 - 1))
+    else if (index._1 > 0)
+      Some((index._1 - 1, arrays(index._1 - 1).length - 1))
+    else
+      None
+
   def arrayGet(pair: Index): T =
-    arrays(pair._1)(pair._2)
+    arrays(pair._1).get(pair._2)
 
 }
 
@@ -85,8 +99,12 @@ object UnboundedStack {
     //    assert(st.pop == Some("!"))
     //    assert(st.pop == Some("Hello"))
     println(st.push("a"))
-    println(st.push("a"))
-    println(st.push("a"))
+    println(st.push("b"))
+    println(st.push("c"))
+    println(st.pop)
+    println(st.pop)
+    println(st.pop)
+    println(st.pop)
     //    st.push("1")
     //    assert(st.pop == Some("1"))
     println("Done.")
